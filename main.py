@@ -159,26 +159,20 @@ class ConvertWorker(QObject):
         path=tmp.name; tmp.close()
         self.finished.emit(path)
 
-# --- TimelineView with click, zoom, segments, fixed cursor thickness ---
+# --- TimelineView (unchanged) ---
 class TimelineView(QGraphicsView):
     positionClicked = Signal(float)
-
     def __init__(self, duration, parent=None):
         super().__init__(parent)
-        self.duration=duration
-        self.segments=[]
-        self.cursor_x=0.0
-        self.setScene(QGraphicsScene(self))
+        self.duration=duration; self.segments=[]; self.cursor_x=0.0
+        self.setScene( QGraphicsScene(self) )
         self.setRenderHints(self.renderHints()|QPainter.Antialiasing)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setDragMode(QGraphicsView.ScrollHandDrag)
         self._draw_segments()
-
     def set_segments(self, segments):
-        self.segments=segments
-        self._draw_segments()
-
+        self.segments=segments; self._draw_segments()
     def _draw_segments(self):
         sc=self.scene(); sc.clear()
         w=max(800,int(self.duration*100))
@@ -187,43 +181,37 @@ class TimelineView(QGraphicsView):
             if s>1000: continue
             ex=min(e,1000)
             x0=s*100; width=(ex-s)*100
-            color = (
-                QColor(200,0,0) if st=="estop" else
-                QColor(80,80,80) if st=="disabled" else
-                QColor(0,200,0) if st=="autonomous" else
-                QColor(0,0,200)
-            )
+            color=QColor(200,0,0) if st=="estop" else \
+                  QColor(80,80,80) if st=="disabled" else \
+                  QColor(0,200,0) if st=="autonomous" else \
+                  QColor(0,0,200)
             sc.addRect(x0,0,width,80,QPen(Qt.NoPen),QBrush(color))
         sc.addRect(0,0,w,80,QPen(Qt.white))
-
     def wheelEvent(self, ev):
         dx=ev.angleDelta().x(); dy=ev.angleDelta().y()
         if dx:
-            sb=self.horizontalScrollBar()
-            sb.setValue(sb.value()-dx)
+            sb=self.horizontalScrollBar(); sb.setValue(sb.value()-dx)
             return
         factor=1.2**(dy/120) if dy else 1.0
-        current=self.transform().m11()
-        scene_w=self.sceneRect().width(); view_w=self.viewport().width()
-        min_scale=view_w/scene_w if scene_w>0 else 1.0
-        new=current*factor
-        if new<min_scale: factor=min_scale/current
-        self.scale(factor,1)
-        self.viewport().update()
-
+        cur=self.transform().m11()
+        sw=self.sceneRect().width(); vw=self.viewport().width()
+        min_s=vw/sw if sw>0 else 1.0
+        new=cur*factor
+        if new<min_s: factor=min_s/cur
+        self.scale(factor,1); self.viewport().update()
     def mousePressEvent(self, ev):
-        if ev.button()==Qt.LeftButton:
-            pt=self.mapToScene(ev.pos())
-            ts=max(0,min(pt.x()/100,self.duration,1000))
+        if ev.button() == Qt.LeftButton:
+            # use the new .position() (QPointF) instead of .pos()
+            p = ev.position()
+            pt = self.mapToScene(p.x(), p.y())
+            ts = max(0, min(pt.x()/100, self.duration, 1000))
             self.positionClicked.emit(ts)
         super().mousePressEvent(ev)
-
     def update_cursor(self, t):
         if t>1000: return
         self.cursor_x=t*100
         self.ensureVisible(self.cursor_x,0,50,80)
         self.viewport().update()
-
     def drawForeground(self, painter, rect):
         painter.save(); painter.resetTransform()
         pen=QPen(Qt.white); pen.setWidth(1); painter.setPen(pen)
@@ -246,7 +234,7 @@ class TimelineView(QGraphicsView):
         painter.drawLine(x,0,x,vh)
         painter.restore()
 
-# --- Controller ---
+# --- Controller (unchanged) ---
 class Controller(QObject):
     loaded=Signal(int,float)
     segmentsChanged=Signal(list)
@@ -336,7 +324,6 @@ class Controller(QObject):
         total=len(self.log)
         while self.idx<total and self.log[self.idx][0]<=now:
             ts,key,tp,val=self.log[self.idx]
-            # publish
             if self.is_publishing and self.nt_table:
                 if tp=="boolean":
                     self.nt_table.putBoolean(key,val=="True")
@@ -364,39 +351,52 @@ class Controller(QObject):
         self.progressChanged.emit(self.idx,total)
         self.elapsedChanged.emit(now)
 
-# --- TrayWindow bottom-right, frameless, not movable, with close 'X' ---
+# --- TrayWindow with status + elapsed ---
 class TrayWindow(QWidget):
     def __init__(self, ctrl, full_win):
         super().__init__(None, Qt.Tool)
         self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
-        self.setAttribute(Qt.WA_TranslucentBackground, False)
+        self.setAttribute(Qt.WA_StyledBackground)
         self.setFixedSize(600,180)
 
         self.ctrl, self.full = ctrl, full_win
 
-        btn_open = QPushButton("Open Log")
-        btn_open.clicked.connect(lambda: ctrl.open_log(self))
+        # Buttons
+        btn_open   = QPushButton("Open Log")
+        btn_open.clicked.connect(self._on_open)
         self.btn_replay = QPushButton("Play")
         self.btn_replay.setEnabled(False)
-        self.btn_replay.clicked.connect(lambda: (ctrl.toggle_replay(), self._update()))
-        self.btn_pub = QPushButton("Start Broadcast")
+        self.btn_replay.clicked.connect(self._on_toggle_replay)
+        self.btn_pub    = QPushButton("Start Broadcast")
         self.btn_pub.setEnabled(False)
-        self.btn_pub.clicked.connect(lambda: (ctrl.toggle_publish(), self._update_pub()))
-        btn_full = QPushButton("Full App")
+        self.btn_pub.clicked.connect(self._on_toggle_pub)
+        btn_full   = QPushButton("Full App")
         btn_full.clicked.connect(full_win.show)
-        btn_close = QPushButton("✕")
+        btn_close  = QPushButton("✕")
         btn_close.setFixedSize(20,20)
         btn_close.clicked.connect(self.hide)
         btn_close.setStyleSheet("background:transparent; color:white;")
 
+        # Status & elapsed
+        self.lbl_status  = QLabel("Log not loaded")
+        self.lbl_status.setStyleSheet("color:white")
+        self.lbl_elapsed = QLabel("0.00s")
+        self.lbl_elapsed.setStyleSheet("color:white")
+
+        # Timeline
         self.timeline = TimelineView(1.0)
         self.timeline.positionClicked.connect(lambda ts: (ctrl.seek(ts), self.timeline.update_cursor(ts)))
 
+        # Layout
         top = QHBoxLayout()
         top.addWidget(btn_open)
         top.addWidget(self.btn_replay)
         top.addWidget(self.btn_pub)
         top.addWidget(btn_full)
+        top.addSpacing(15)
+        top.addWidget(self.lbl_status)
+        top.addSpacing(15)
+        top.addWidget(self.lbl_elapsed)
         top.addStretch()
         top.addWidget(btn_close)
         top.setContentsMargins(5,5,5,5)
@@ -407,27 +407,83 @@ class TrayWindow(QWidget):
         layout.setContentsMargins(2,2,2,2)
         self.setLayout(layout)
 
+        # Signal connections
         ctrl.loaded.connect(self._on_loaded)
         ctrl.segmentsChanged.connect(self.timeline.set_segments)
-        ctrl.progressChanged.connect(lambda *_: self._update())
-        ctrl.elapsedChanged.connect(lambda e: self.timeline.update_cursor(min(e,self.timeline.duration)))
+        ctrl.elapsedChanged.connect(self._on_elapsed)
+        # Play/stop updates
+        ctrl.progressChanged.connect(lambda *_: self._update_play_status())
+        ctrl.elapsedChanged.connect(
+            lambda e: self.timeline.update_cursor(min(e, self.timeline.duration))
+        )
+
+    def _on_open(self):
+        self.lbl_status.setText("Loading log")
+        self.lbl_status.setStyleSheet("color:orange")
+        self.ctrl.open_log(self)
 
     def _on_loaded(self, total, dur):
         self.btn_replay.setEnabled(True)
         self.btn_pub.setEnabled(True)
+
+        # redraw segments
         self.timeline.duration = dur
         self.timeline.set_segments(self.ctrl.segments)
-        self._update()
-        self._update_pub()
 
-    def _update(self):
-        self.btn_replay.setText("Stop Replay" if self.ctrl.timer.isActive() else "Play")
+        # ── ZOOM OUT TO SHOW ENTIRE TIMELINE ──
+        # 1) reset any previous zoom/scale
+        self.timeline.resetTransform()
+        # 2) compute the minimum horizontal scale so scene fits view
+        view_w = self.timeline.viewport().width()
+        scene_w = self.timeline.sceneRect().width()
+        if scene_w > 0:
+            min_scale = view_w / scene_w
+            self.timeline.scale(min_scale, 1.0)
+        # ─────────────────────────────────────────
 
-    def _update_pub(self):
-        self.btn_pub.setText("Stop Broadcast" if self.ctrl.is_publishing else "Start Broadcast")
+        # reset cursor & status
+        self.timeline.update_cursor(0.0)
+        self.lbl_status.setText("Ready")
+        self.lbl_status.setStyleSheet("color:white")
+        self.lbl_elapsed.setText("0.00s")
+
+        self._update_play_status()
+        self._update_pub_status()
+
+    def _on_toggle_replay(self):
+        self.ctrl.toggle_replay()
+        self._update_play_status()
+
+    def _on_toggle_pub(self):
+        self.ctrl.toggle_publish()
+        self._update_pub_status()
+
+    def _update_play_status(self):
+        running = self.ctrl.timer.isActive()
+        self.btn_replay.setText("Stop Replay" if running else "Play")
+        if running:
+            self.btn_replay.setStyleSheet("background-color: #53c268; color: white;")
+        else:
+            self.btn_replay.setStyleSheet("background-color: #cf4e4e; color: white;")
+         # don't overwrite "Loading log"
+        if self.lbl_status.text() not in ("Loading log",):
+             status = "Running" if running else "Ready"
+             self.lbl_status.setText(status)
+
+    def _update_pub_status(self):
+        on = self.ctrl.is_publishing
+        # text
+        self.btn_pub.setText("Stop Broadcast" if on else "Start Broadcast")
+        # color
+        if on:
+            self.btn_pub.setStyleSheet("background-color: #53c268; color: white;")
+        else:
+            self.btn_pub.setStyleSheet("background-color: #cf4e4e; color: white;")
+
+    def _on_elapsed(self, e):
+        self.lbl_elapsed.setText(f"{e:.2f}s")
 
     def showEvent(self, event):
-        # compute taskbar height
         full = QApplication.primaryScreen().geometry()
         avail = QApplication.primaryScreen().availableGeometry()
         tb_height = full.height() - avail.height()
@@ -442,7 +498,7 @@ class FullWindow(QMainWindow):
     def __init__(self, ctrl):
         super().__init__()
         self.ctrl = ctrl
-        self.setWindowTitle("FRC Full App")
+        self.setWindowTitle("MAritz")
         self.setGeometry(200,200,900,200)
         p = QPalette()
         p.setColor(QPalette.Window, QColor(53,53,53))
@@ -502,9 +558,21 @@ class FullWindow(QMainWindow):
         ctrl.elapsedChanged.connect(lambda e: self.timeline.update_cursor(min(e,self.timeline.duration)))
 
     def _update(self):
-        self.btn_replay.setText("Stop Replay" if self.ctrl.timer.isActive() else "Play")
+        running = self.ctrl.timer.isActive()
+        self.btn_replay.setText("Stop Replay" if running else "Play")
+        if running:
+            self.btn_replay.setStyleSheet("background-color: #53c268; color: white;")
+        else:
+            self.btn_replay.setStyleSheet("background-color: #cf4e4e; color: white;")
+
     def _update_pub(self):
-        self.btn_pub.setText("Stop Broadcast" if self.ctrl.is_publishing else "Start Broadcast")
+        on = self.ctrl.is_publishing
+        self.btn_pub.setText("Stop Broadcast" if on else "Start Broadcast")
+        if on:
+            self.btn_pub.setStyleSheet("background-color: #53c268; color: white;")
+        else:
+            self.btn_pub.setStyleSheet("background-color: #cf4e4e; color: white;")
+
     def _update_progress(self, ts):
         idx = bisect.bisect_left(self.ctrl.timestamps, ts)
         tot = len(self.ctrl.log)
@@ -526,7 +594,7 @@ def main():
     tray_win.setWindowIcon(tray_icon)
 
     tray = QSystemTrayIcon(tray_icon, app)
-    tray.setToolTip("FRC Log Replayer")
+    tray.setToolTip("MAritz")
     menu = QMenu()
     show_action = QAction("Show Controls")
     show_action.triggered.connect(tray_win.show)
