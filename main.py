@@ -515,7 +515,7 @@ def main():
     app = QApplication(sys.argv)
 
     base = Path(__file__).parent
-    icon_path = base/"icons"/"icon.ico"
+    icon_path = base/"icon.ico"
     tray_icon = QIcon(str(icon_path))
     app.setWindowIcon(tray_icon)
 
