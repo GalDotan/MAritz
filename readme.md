@@ -73,7 +73,7 @@ python main.py
 
 ---
 
-🏗️ Build Standalone EXE
+## 🏗️ Build Standalone EXE
 We use PyInstaller to bundle everything into one `.exe`:
 
 ```
@@ -92,6 +92,6 @@ After it finishes, distribute only `dist\main.exe`.
 
 ---
 
-⚖️ License
+## ⚖️ License
 This project is provided as-is.
 Feel free to adapt for your team’s needs!
