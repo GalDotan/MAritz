@@ -20,12 +20,11 @@ from PySide6.QtGui import (
 
 import struct
 from typing import SupportsBytes
-
-# --- NetworkTables import ---
 try:
     from ntcore import NetworkTableInstance
 except ImportError:
     NetworkTableInstance = None
+
 
 # --- WPILOG parser (unchanged) ---
 floatStruct = struct.Struct("<f")
@@ -246,7 +245,7 @@ class TimelineView(QGraphicsView):
         painter.drawLine(x,0,x,vh)
         painter.restore()
 
-# --- Controller ---
+# --- Controller (connect NT in toggle_publish, not in toggle_replay) ---
 class Controller(QObject):
     loaded=Signal(int,float)
     segmentsChanged=Signal(list)
@@ -264,8 +263,12 @@ class Controller(QObject):
         self.nt_table=None
         self.timer=QTimer(self); self.timer.setInterval(10); self.timer.timeout.connect(self._tick)
 
+        # pick the server you want to talk to
+        self.nt_host = "127.0.0.1"  # or robot IP / hostname
+        self.nt_port = 5810         # NT4 default; use 1735 if your server is NT3
+
     def open_log(self, parent):
-        path,_=QFileDialog.getOpenFileName(parent,"Open WPILog","*.wpilog")
+        path,_=QFileDialog.getOpenFileName(parent, "Open WPILog", "","WPILog Files (*.wpilog);;All Files (*)")
         if not path: return
         self.worker=ConvertWorker(Path(path))
         self.thread=QThread()
@@ -310,22 +313,40 @@ class Controller(QObject):
         self.loaded.emit(total,duration)
         self.segmentsChanged.emit(segs)
 
+    def _connect_nt(self):
+        if not self.nt_inst:
+            print("ntcore not available; install robotpy-ntcore.")
+            return False
+        self.nt_inst.stopClient()  # ensure clean state
+        # Set server first, then start client
+        self.nt_inst.setServer(self.nt_host, self.nt_port)
+        self.nt_inst.startClient4("MAritz")
+        self.nt_table=self.nt_inst.getTable("Replay")
+        return True
+
+    def _disconnect_nt(self):
+        if self.nt_inst:
+            self.nt_inst.stopClient()
+        self.nt_table=None
+
+    def toggle_publish(self):
+        # Turn publishing on/off AND connect/disconnect NT here
+        self.is_publishing = not self.is_publishing
+        if self.is_publishing:
+            ok = self._connect_nt()
+            if not ok:
+                self.is_publishing = False
+        else:
+            self._disconnect_nt()
+
     def toggle_replay(self):
         if not self.log: return
         if not self.timer.isActive():
             base=self.timestamps[self.idx] if self.idx<len(self.timestamps) else 0.0
             self.start_time=time.perf_counter()-base
-            if self.is_publishing and self.nt_inst:
-                self.nt_inst.startClient4("log-replay"); self.nt_inst.setServer("localhost")
-                self.nt_table=self.nt_inst.getTable("log")
             self.timer.start()
         else:
             self.timer.stop()
-
-    def toggle_publish(self):
-        self.is_publishing=not self.is_publishing
-        if not self.is_publishing and self.nt_inst:
-            self.nt_inst.stopClient()
 
     def seek(self, t):
         self.idx=bisect.bisect_left(self.timestamps,t)
@@ -336,7 +357,6 @@ class Controller(QObject):
         total=len(self.log)
         while self.idx<total and self.log[self.idx][0]<=now:
             ts,key,tp,val=self.log[self.idx]
-            # publish
             if self.is_publishing and self.nt_table:
                 if tp=="boolean":
                     self.nt_table.putBoolean(key,val=="True")
@@ -363,6 +383,7 @@ class Controller(QObject):
             self.idx+=1
         self.progressChanged.emit(self.idx,total)
         self.elapsedChanged.emit(now)
+
 
 # --- TrayWindow bottom-right, frameless, not movable, with close 'X' ---
 class TrayWindow(QWidget):
