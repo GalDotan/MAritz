@@ -1,5 +1,5 @@
 
-import sys, time, csv, threading
+import sys, time, csv, threading, json
 
 try:
     from ntcore import NetworkTableInstance
@@ -12,7 +12,7 @@ class Publisher:
     def __init__(self):
         self.inst = None
         self.table = None
-        self.frames = []     # list[dict[str,(type,value)]]
+        self.frames = []     # list[dict[str,(type,value,meta)]]
         self.idx = 0
         self.start = time.perf_counter()
         self.playing = False
@@ -27,26 +27,27 @@ class Publisher:
             self.inst.stopClient()
         self.inst = NetworkTableInstance.getDefault()
         self.inst.setServer(host, int(port))
-        # Critical: set NT update rate so it doesn't batch at 100ms (default)
         try:
-            self.inst.setUpdateRate(PERIOD)   # 20ms
+            self.inst.setUpdateRate(PERIOD)
         except Exception:
             pass
-        self.inst.startClient4("MAritz")
+        self.inst.startClient4("MAritzPyProc")
         self.table = self.inst.getTable("Replay")
 
     def _coalesce(self, path):
         rows = []
         with open(path, newline="", encoding="utf-8") as f:
-            r = csv.reader(f); next(r, None)
+            r = csv.reader(f); header = next(r, None)
             for row in r:
                 try:
                     ts = float(row[0])
                 except:
                     continue
                 if ts > 1000.0:
-                    continue 
-                rows.append((ts, row[1], row[2], row[3]))
+                    continue
+                key, tp, val = row[1], row[2], row[3]
+                meta = row[4] if len(row)>=5 else ""
+                rows.append((ts, key, tp, val, meta))
         rows.sort(key=lambda x: x[0])
         if not rows:
             self.frames = []
@@ -54,9 +55,9 @@ class Publisher:
         last_ts = rows[-1][0]
         nframes = int(last_ts / PERIOD) + 1
         frames = [dict() for _ in range(nframes)]
-        for ts, key, tp, val in rows:
+        for ts, key, tp, val, meta in rows:
             fi = int(ts / PERIOD)
-            frames[fi][key] = (tp, val)  # last one wins within frame
+            frames[fi][key] = (tp, val, meta)  # last one wins within frame
         self.frames = frames
         self.idx = 0
         self.start = time.perf_counter()
@@ -94,7 +95,7 @@ class Publisher:
         with self.lock:
             self.publishing = on
 
-    def _put(self, key, tp, val):
+    def _put(self, key, tp, val, meta):
         if not self.table:
             return
         e = self.table.getEntry(key)
@@ -117,24 +118,44 @@ class Publisher:
             e.setDoubleArray(nums)
         elif tp == "string[]":
             e.setStringArray(val.split(",") if val else [])
+        elif tp == "raw":
+            # Expect meta to be a JSON dict with at least {"type":"struct:Pose2d", "schema":"..."}
+            type_str = None
+            if meta:
+                try:
+                    m = json.loads(meta)
+                    type_str = m.get("type", None)
+                except Exception:
+                    type_str = None
+            if not type_str:
+                type_str = "raw"  # fallback
+            try:
+                b = bytes.fromhex(val)
+            except Exception:
+                b = b""
+            try:
+                e.setRaw(b, type_str)
+            except Exception:
+                # fallback to plain raw if type fails
+                try:
+                    e.setRaw(b)
+                except Exception:
+                    pass
         else:
             e.setString(val)
 
     def run(self):
-        # sleep-until loop with drift correction
         next_wake = time.perf_counter()
         prev_frame = {}
         while not self.exit:
-            # sleep most of the period, but finish with a short busy-wait to reduce scheduler jitter
             now = time.perf_counter()
             delay = next_wake - now
             if delay > 0.002:
-                time.sleep(delay - 0.001)  # leave ~1ms for busy wait
+                time.sleep(delay - 0.001)
             while True:
                 now = time.perf_counter()
                 if now >= next_wake:
                     break
-            # run frame(s)
             with self.lock:
                 playing = self.playing
                 publishing = self.publishing
@@ -146,16 +167,13 @@ class Publisher:
                 while idx <= target_idx and idx < len(self.frames):
                     if publishing:
                         frame = self.frames[idx]
-                        # publish changes only
-                        for k,(tp,val) in frame.items():
-                            if prev_frame.get(k) != (tp,val):
-                                self._put(k, tp, val)
-                        # prune keys removed in this frame (NT has no unset needed here)
+                        for k,(tp,val,meta) in frame.items():
+                            if prev_frame.get(k) != (tp,val,meta):
+                                self._put(k, tp, val, meta)
                         for k in list(prev_frame.keys()):
                             if k not in frame:
                                 prev_frame.pop(k)
                         prev_frame = frame
-                        # force immediate network flush so we don't wait for default batching
                         try:
                             self.inst.flush()
                         except Exception:
@@ -165,11 +183,9 @@ class Publisher:
                     self.idx = idx
                     if self.idx >= len(self.frames):
                         self.playing = False
-            # schedule next tick; correct drift if we fell behind
             next_wake += PERIOD
             behind = now - next_wake
             if behind > PERIOD:
-                # skip ahead to current wall time grid
                 missed = int(behind / PERIOD)
                 next_wake += missed * PERIOD
 
@@ -210,12 +226,4 @@ def main():
             print("ERR", flush=True)
 
 if __name__ == "__main__":
-    # try to increase priority on Windows
-    try:
-        import psutil, os
-        p = psutil.Process(os.getpid())
-        if hasattr(psutil, "HIGH_PRIORITY_CLASS"):
-            p.nice(psutil.HIGH_PRIORITY_CLASS)
-    except Exception:
-        pass
     main()

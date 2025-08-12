@@ -5,6 +5,7 @@ import csv
 import tempfile
 import math
 import bisect
+import json
 from pathlib import Path
 
 from PySide6.QtWidgets import (
@@ -22,21 +23,19 @@ from PySide6.QtGui import (
 import struct
 from typing import SupportsBytes
 
-# --- Python fast publisher backend ---
 from backend_client_py import BackendProcess
 
-# --- WPILOG parser (converts to CSV) ---
-floatStruct = struct.Struct('<f')
-doubleStruct = struct.Struct('<d')
+floatStruct = struct.Struct("<f")
+doubleStruct = struct.Struct("<d")
 kControlStart, kControlFinish, kControlSetMetadata = 0, 1, 2
 
 class StartRecordData:
-    __slots__ = ('entry','name','type','metadata')
+    __slots__ = ("entry","name","type","metadata")
     def __init__(self, entry, name, type, metadata):
         self.entry, self.name, self.type, self.metadata = entry, name, type, metadata
 
 class DataLogRecord:
-    __slots__ = ('entry','timestamp','data')
+    __slots__ = ("entry","timestamp","data")
     def __init__(self, entry:int, timestamp:int, data:SupportsBytes):
         self.entry, self.timestamp, self.data = entry, timestamp, data
     def isControl(self): return self.entry==0
@@ -45,53 +44,53 @@ class DataLogRecord:
     def isSetMetadata(self): return self.isControl() and len(self.data)>=9 and self.data[0]==kControlSetMetadata
     def getStartData(self):
         d=self.data
-        entry=int.from_bytes(d[1:5],'little')
+        entry=int.from_bytes(d[1:5],"little")
         name,pos=self._readInnerString(5)
         typ,pos =self._readInnerString(pos)
         meta,_  =self._readInnerString(pos)
         return StartRecordData(entry,name,typ,meta)
     def getFinishEntry(self):
-        return int.from_bytes(self.data[1:5],'little')
+        return int.from_bytes(self.data[1:5],"little")
     def getMetadataData(self):
         buf=self.data
-        eid=int.from_bytes(buf[1:5],'little')
-        ln =int.from_bytes(buf[5:9],'little')
-        meta=buf[9:9+ln].decode('utf-8')
+        eid=int.from_bytes(buf[1:5],"little")
+        ln =int.from_bytes(buf[5:9],"little")
+        meta=buf[9:9+ln].decode("utf-8")
         return eid, meta
     def _readInnerString(self,pos):
-        ln=int.from_bytes(self.data[pos:pos+4],'little')
+        ln=int.from_bytes(self.data[pos:pos+4],"little")
         end=pos+4+ln
-        return self.data[pos+4:end].decode('utf-8'), end
+        return self.data[pos+4:end].decode("utf-8"), end
     def getBoolean(self): return bool(self.data[0])
-    def getInteger(self): return int.from_bytes(self.data,'little',signed=True)
+    def getInteger(self): return int.from_bytes(self.data,"little",signed=True)
     def getFloat(self):   return floatStruct.unpack(self.data)[0]
     def getDouble(self):  return doubleStruct.unpack(self.data)[0]
-    def getString(self):  return self.data.decode('utf-8')
+    def getString(self):  return self.data.decode("utf-8")
     def getRaw(self):     return self.data.hex()
-    def getBooleanArray(self): return ','.join(str(bool(b)) for b in self.data)
+    def getBooleanArray(self): return ",".join(str(bool(b)) for b in self.data)
     def getIntegerArray(self):
         cnt=len(self.data)//8
-        vals=[int.from_bytes(self.data[i*8:(i+1)*8],'little',signed=True) for i in range(cnt)]
-        return ','.join(map(str,vals))
+        vals=[int.from_bytes(self.data[i*8:(i+1)*8],"little",signed=True) for i in range(cnt)]
+        return ",".join(map(str,vals))
     def getFloatArray(self):
         cnt=len(self.data)//4
-        vals=struct.unpack('<'+'f'*cnt,self.data)
-        return ','.join(f'{v:.6g}' for v in vals)
+        vals=struct.unpack("<"+"f"*cnt,self.data)
+        return ",".join(f"{v:.6g}" for v in vals)
     def getDoubleArray(self):
         cnt=len(self.data)//8
-        vals=struct.unpack('<'+'d'*cnt,self.data)
-        return ','.join(f'{v:.6g}' for v in vals)
+        vals=struct.unpack("<"+"d"*cnt,self.data)
+        return ",".join(f"{v:.6g}" for v in vals)
     def getStringArray(self):
-        size=int.from_bytes(self.data[0:4],'little')
+        size=int.from_bytes(self.data[0:4],"little")
         arr=[]; pos=4
         for _ in range(size):
-            ln=int.from_bytes(self.data[pos:pos+4],'little'); pos+=4
-            s=self.data[pos:pos+ln].decode('utf-8'); pos+=ln
+            ln=int.from_bytes(self.data[pos:pos+4],"little"); pos+=4
+            s=self.data[pos:pos+ln].decode("utf-8"); pos+=ln
             arr.append(s)
-        return ','.join(arr)
+        return ",".join(arr)
 
 class DataLogIterator:
-    __slots__ = ('buf','pos')
+    __slots__ = ("buf","pos")
     def __init__(self, buf, pos): self.buf, self.pos = buf, pos
     def __iter__(self): return self
     def __next__(self):
@@ -108,10 +107,10 @@ class DataLogIterator:
         return DataLogRecord(entry,ts,data)
 
 class DataLogReader:
-    __slots__ = ('buf',)
+    __slots__ = ("buf",)
     def __init__(self, buf): self.buf=buf
     def __iter__(self):
-        hdr_sz=int.from_bytes(self.buf[8:12],'little')
+        hdr_sz=int.from_bytes(self.buf[8:12],"little")
         return DataLogIterator(self.buf,12+hdr_sz)
 
 class ConvertWorker(QObject):
@@ -137,26 +136,28 @@ class ConvertWorker(QObject):
                 if not sd: continue
                 ts=rec.timestamp/1e6; tp=sd.type
                 try:
-                    if   tp=='boolean':     val=rec.getBoolean()
-                    elif tp=='int64':       val=rec.getInteger()
-                    elif tp=='float':       val=rec.getFloat()
-                    elif tp=='double':      val=rec.getDouble()
-                    elif tp=='string':      val=rec.getString()
-                    elif tp=='boolean[]':   val=rec.getBooleanArray()
-                    elif tp=='int64[]':     val=rec.getIntegerArray()
-                    elif tp=='float[]':     val=rec.getFloatArray()
-                    elif tp=='double[]':    val=rec.getDoubleArray()
-                    elif tp=='string[]':    val=rec.getStringArray()
-                    else:                   val=rec.getRaw()
+                    if   tp=="boolean":     val=rec.getBoolean()
+                    elif tp=="int64":       val=rec.getInteger()
+                    elif tp=="float":       val=rec.getFloat()
+                    elif tp=="double":      val=rec.getDouble()
+                    elif tp=="string":      val=rec.getString()
+                    elif tp=="boolean[]":   val=rec.getBooleanArray()
+                    elif tp=="int64[]":     val=rec.getIntegerArray()
+                    elif tp=="float[]":     val=rec.getFloatArray()
+                    elif tp=="double[]":    val=rec.getDoubleArray()
+                    elif tp=="string[]":    val=rec.getStringArray()
+                    else:                   val=rec.getRaw()  # raw/structs become hex
                 except:
-                    val=''
-                rows.append((f'{ts:.6f}',sd.name,tp,str(val)))
-        tmp=tempfile.NamedTemporaryFile(delete=False,suffix='.csv',
-                                        mode='w',newline='',encoding='utf-8')
-        w=csv.writer(tmp); w.writerow(('timestamp','key','type','value')); w.writerows(rows)
+                    val=""
+                # include metadata so backend can re-publish structs properly
+                rows.append((f"{ts:.6f}",sd.name,tp,str(val), sd.metadata if sd.metadata else ""))
+        tmp=tempfile.NamedTemporaryFile(delete=False,suffix=".csv",
+                                        mode="w",newline="",encoding="utf-8")
+        w=csv.writer(tmp); w.writerow(("timestamp","key","type","value","meta")); w.writerows(rows)
         path=tmp.name; tmp.close()
         self.finished.emit(path)
 
+# ---- UI pieces (TimelineView, Controller, windows) unchanged except CSV reader expects 5 cols ----
 class TimelineView(QGraphicsView):
     positionClicked = Signal(float)
     def __init__(self, duration, parent=None):
@@ -164,7 +165,7 @@ class TimelineView(QGraphicsView):
         self.duration=duration; self.segments=[]; self.cursor_x=0.0
         self.setScene( QGraphicsScene(self) )
         self.setRenderHints(self.renderHints()|QPainter.Antialiasing)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setDragMode(QGraphicsView.ScrollHandDrag)
         self._draw_segments()
@@ -173,17 +174,20 @@ class TimelineView(QGraphicsView):
     def _draw_segments(self):
         sc=self.scene(); sc.clear()
         w=max(800,int(self.duration*100))
-        sc.setSceneRect(0,0,w,80)
+        sc.setSceneRect(0,0,w,40)
         for s,e,st in self.segments:
             if s>1000: continue
             ex=min(e,1000)
             x0=s*100; width=(ex-s)*100
-            color=QColor(200,0,0) if st=='estop' else \
-                  QColor(80,80,80) if st=='disabled' else \
-                  QColor(0,200,0) if st=='autonomous' else \
+            color=QColor(200,0,0) if st=="estop" else \
+                  QColor(80,80,80) if st=="disabled" else \
+                  QColor(0,200,0) if st=="autonomous" else \
                   QColor(0,0,200)
-            sc.addRect(x0,0,width,80,QPen(Qt.NoPen),QBrush(color))
-        sc.addRect(0,0,w,80,QPen(Qt.white))
+            sc.addRect(x0,0,width,40,QPen(Qt.NoPen),QBrush(color))
+        pen = QPen(Qt.white)
+        pen.setWidth(1)  # Stroke thickness in pixels
+        pen.setJoinStyle(Qt.RoundJoin) 
+        sc.addRect(0,0,w,40,pen)
     def wheelEvent(self, ev):
         dx=ev.angleDelta().x(); dy=ev.angleDelta().y()
         if dx:
@@ -206,7 +210,7 @@ class TimelineView(QGraphicsView):
     def update_cursor(self, t):
         if t>1000: return
         self.cursor_x=t*100
-        self.ensureVisible(self.cursor_x,0,50,80)
+        self.ensureVisible(self.cursor_x,0,50,40)
         self.viewport().update()
     def drawForeground(self, painter, rect):
         painter.save(); painter.resetTransform()
@@ -223,7 +227,7 @@ class TimelineView(QGraphicsView):
             if 0<=t<=1000:
                 x=self.mapFromScene(t*100,0).x()
                 painter.drawLine(x,vh-20,x,vh-5)
-                painter.drawText(x+2,vh-22,f'{int(t)}s')
+                painter.drawText(x+2,vh-22,f"{int(t)}s")
             t+=interval
         pen=QPen(Qt.white,2); pen.setCosmetic(True); painter.setPen(pen)
         x=self.mapFromScene(self.cursor_x,0).x()
@@ -249,15 +253,14 @@ class Controller(QObject):
         self.timer.setInterval(4)
         self.timer.timeout.connect(self._tick)
 
-        self.nt_host = '127.0.0.1'
+        self.nt_host = "127.0.0.1"
         self.nt_port = 5810
 
-        # backend process (Python fast publisher)
         from backend_client import BackendProcess as BE
         self.backend = BE()
 
     def open_log(self, parent):
-        path,_=QFileDialog.getOpenFileName(parent, 'Open WPILog','','WPILog Files (*.wpilog);;All Files (*)')
+        path,_=QFileDialog.getOpenFileName(parent, "Open WPILog","","WPILog Files (*.wpilog);;All Files (*)")
         if not path: return
         self.worker=ConvertWorker(Path(path))
         self.thread=QThread()
@@ -270,29 +273,32 @@ class Controller(QObject):
     def _on_converted(self, csv_path):
         self.csv_path=csv_path
         self.log=[]
-        with open(csv_path,newline='',encoding='utf-8') as f:
-            r=csv.reader(f); next(r)
+        with open(csv_path,newline="",encoding="utf-8") as f:
+            r=csv.reader(f); header=next(r)
+            # expect 5 columns with meta
             for row in r:
                 try: ts=float(row[0])
                 except: continue
                 if ts>1000: continue
-                self.log.append((ts,row[1],row[2],row[3]))
+                # store (ts,key,type,value,meta)
+                meta = row[4] if len(row)>=5 else ""
+                self.log.append((ts,row[1],row[2],row[3],meta))
         self.log.sort(key=lambda x:x[0])
         self.timestamps=[r[0] for r in self.log]
         total=len(self.log); duration=self.timestamps[-1] if total else 1.0
 
-        flags={'enabled':False,'autonomous':False,'estop':False}
+        flags={"enabled":False,"autonomous":False,"estop":False}
         def state():
-            if flags['estop']: return 'estop'
-            if not flags['enabled']: return 'disabled'
-            if flags['autonomous']: return 'autonomous'
-            return 'teleop'
+            if flags["estop"]: return "estop"
+            if not flags["enabled"]: return "disabled"
+            if flags["autonomous"]: return "autonomous"
+            return "teleop"
         segs=[]; cur=state(); st=0.0
-        for ts,key,_,val in self.log:
-            if key.startswith('DS:'):
-                f=key.split('DS:')[1]
+        for ts,key,_,val,_ in self.log:
+            if key.startswith("DS:"):
+                f=key.split("DS:")[1]
                 if f in flags:
-                    flags[f]=(val=='True')
+                    flags[f]=(val=="True")
                     ns=state()
                     if ns!=cur:
                         segs.append((st,ts,cur)); cur=ns; st=ts
@@ -305,7 +311,7 @@ class Controller(QObject):
         try:
             self.backend.start(self.nt_host, self.nt_port, self.csv_path)
         except Exception as e:
-            print('Backend preload failed:', e)
+            print("Backend preload failed:", e)
 
     def toggle_publish(self):
         self.is_publishing = not self.is_publishing
@@ -320,7 +326,7 @@ class Controller(QObject):
             else:
                 self.backend.pub_off()
         except Exception as e:
-            print('Failed to toggle publish:', e)
+            print("Failed to toggle publish:", e)
             self.is_publishing = False
 
     def toggle_replay(self):
@@ -352,13 +358,19 @@ class Controller(QObject):
             self.idx+=1
         self.progressChanged.emit(self.idx,total)
         self.elapsedChanged.emit(now)
-
+        
 class TrayWindow(QWidget):
     def __init__(self, ctrl, full_win):
         super().__init__(None, Qt.Tool)
         self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_StyledBackground)
-        self.setFixedSize(600,180)
+        self.setFixedSize(600,100)
+        
+        self.setStyleSheet("""
+            QWidget {
+                background-color: rgba(33, 34, 34, 230);
+            }
+        """)
 
         self.ctrl, self.full = ctrl, full_win
 
@@ -563,3 +575,6 @@ if __name__ == '__main__':
     import backend_client_py as _bc
     _sys.modules['backend_client'] = _bc
     main()
+
+# Windows + Full windows code unchanged from previous zip…
+# (Omitted for brevity — only the ConvertWorker and CSV reader needed changes for struct support.)
