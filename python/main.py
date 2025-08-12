@@ -256,8 +256,9 @@ class Controller(QObject):
         self.nt_host = "127.0.0.1"
         self.nt_port = 5810
 
-        from backend_client import BackendProcess as BE
-        self.backend = BE()
+        if not hasattr(self, "backend") or self.backend is None:
+            from backend_client import BackendProcess as BE
+            self.backend = BE()
 
     def open_log(self, parent):
         path,_=QFileDialog.getOpenFileName(parent, "Open WPILog","","WPILog Files (*.wpilog);;All Files (*)")
@@ -317,7 +318,9 @@ class Controller(QObject):
         self.is_publishing = not self.is_publishing
         try:
             if self.is_publishing:
-                self.backend.pub_on()
+                resp = self.backend.pub_on()
+                if resp != "OK":
+                    raise RuntimeError(f"Backend replied: {resp}")
                 if self.timestamps:
                     cur_t = self.timestamps[self.idx] if self.idx < len(self.timestamps) else 0.0
                     self.backend.seek(cur_t)
@@ -326,7 +329,7 @@ class Controller(QObject):
             else:
                 self.backend.pub_off()
         except Exception as e:
-            print("Failed to toggle publish:", e)
+            print('Failed to toggle publish:', e)
             self.is_publishing = False
 
     def toggle_replay(self):
@@ -537,7 +540,8 @@ class FullWindow(QMainWindow):
         self.lbl_elapsed.setText(f'{ts:.2f}s')
 
 def main():
-    app = QApplication(sys.argv)
+    if QApplication.instance() is None:
+        app = QApplication(sys.argv)
 
     base = Path(__file__).parent
     icon_path = base/'icon.ico'
@@ -570,6 +574,20 @@ def main():
     sys.exit(app.exec())
 
 if __name__ == '__main__':
+    import sys as _sys
+
+    if '--publisher' in _sys.argv:
+        # Run backend-only mode (no QApplication, no tray)
+        import multiprocessing
+        multiprocessing.freeze_support()
+
+        from publisher_process import main as _publisher_main
+        _publisher_main()
+        raise SystemExit(0)
+    
+    
+    import multiprocessing
+    multiprocessing.freeze_support()
     # expose backend_client module name expected by Controller import
     import types, sys as _sys
     import backend_client_py as _bc

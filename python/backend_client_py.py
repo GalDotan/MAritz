@@ -10,14 +10,26 @@ class BackendProcess:
     def start(self, host: str, port: int, csv_path: str | None = None):
         if self.proc and self.proc.poll() is None:
             return
+        # locate script path for dev; use flag for frozen exe
         script = str(Path(__file__).parent / "publisher_process.py")
+        if getattr(sys, 'frozen', False):
+            # We are running as PyInstaller exe: re-run same exe in backend mode
+            args = [sys.executable, '--publisher']
+            creationflags = 0
+            if os.name == 'nt':
+                creationflags = 0x08000000  # CREATE_NO_WINDOW (avoid flashing console)
+        else:
+            args = [sys.executable, script]
+            creationflags = 0
+
         self.proc = subprocess.Popen(
-            [sys.executable, script],
+            args,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            creationflags=creationflags
         )
         threading.Thread(target=self._drain, daemon=True).start()
         self.set_server(host, port)
