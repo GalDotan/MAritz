@@ -45,7 +45,7 @@ class Publisher:
                 except:
                     continue
                 if ts > 1000.0:
-                    continue
+                    continue 
                 rows.append((ts, row[1], row[2], row[3]))
         rows.sort(key=lambda x: x[0])
         if not rows:
