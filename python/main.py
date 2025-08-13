@@ -20,10 +20,22 @@ from PySide6.QtGui import (
     QPalette, QColor, QPen, QBrush, QPainter, QFont, QIcon, QAction
 )
 
+from PySide6.QtGui import QPixmap
+
 import struct
 from typing import SupportsBytes
 
 from backend_client_py import BackendProcess
+
+def _asset_path(name: str) -> str:
+    import sys
+    from pathlib import Path
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        base = Path(sys._MEIPASS)  # PyInstaller temp dir
+    else:
+        base = Path(__file__).parent
+    return str((base / name).resolve())
+
 
 floatStruct = struct.Struct("<f")
 doubleStruct = struct.Struct("<d")
@@ -559,7 +571,24 @@ def main():
     if not tray_icon.isNull():
         tray_win.setWindowIcon(tray_icon)
 
+    
+    
+    icon_path = _asset_path("icon.ico")
+    tray_icon = QIcon(icon_path)
+
+    if tray_icon.isNull():
+        # Fallback: draw a small in-memory pixmap so tray always has an icon
+        pm = QPixmap(32, 32)
+        pm.fill(QColor(83, 194, 104))  # green tile
+        p = QPainter(pm); p.setRenderHint(QPainter.Antialiasing)
+        p.setBrush(QBrush(QColor(33, 34, 34))); p.setPen(Qt.NoPen)
+        p.drawEllipse(6, 6, 20, 20)
+        p.end()
+        tray_icon = QIcon(pm)
+
+    app.setWindowIcon(tray_icon)
     tray = QSystemTrayIcon(tray_icon, app)
+    
     tray.setToolTip('MAritz')
     menu = QMenu()
     show_action = QAction('Show Controls')
