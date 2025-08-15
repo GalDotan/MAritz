@@ -1,3 +1,5 @@
+![](/DocsMaterial/logo.png)
+
 # 🚀 **MAritz – FRC WPILOG Replay Over NT**
 
 **MAritz** is a desktop application for replaying `.wpilog` files over NetworkTables in simulation.  
