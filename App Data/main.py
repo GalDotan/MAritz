@@ -1,4 +1,3 @@
-
 import sys
 import time
 import csv
@@ -17,26 +16,26 @@ from PySide6.QtCore import (
     QObject, QThread, Signal, QTimer, Qt
 )
 from PySide6.QtGui import (
-    QPalette, QColor, QPen, QBrush, QPainter, QFont, QIcon, QAction
+    QPalette, QColor, QPen, QBrush, QPainter, QFont, QIcon, QAction, QPixmap
 )
-
-from PySide6.QtGui import QPixmap
 
 import struct
 from typing import SupportsBytes
+from enum import Enum
 
 from backend_client_py import BackendProcess
 
+
+# ---------- asset path (works in PyInstaller + source) ----------
 def _asset_path(name: str) -> str:
-    import sys
-    from pathlib import Path
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-        base = Path(sys._MEIPASS)  # PyInstaller temp dir
+        base = Path(sys._MEIPASS)
     else:
         base = Path(__file__).parent
     return str((base / name).resolve())
 
 
+# ---------- WPILOG parsing ----------
 floatStruct = struct.Struct("<f")
 doubleStruct = struct.Struct("<d")
 kControlStart, kControlFinish, kControlSetMetadata = 0, 1, 2
@@ -158,10 +157,9 @@ class ConvertWorker(QObject):
                     elif tp=="float[]":     val=rec.getFloatArray()
                     elif tp=="double[]":    val=rec.getDoubleArray()
                     elif tp=="string[]":    val=rec.getStringArray()
-                    else:                   val=rec.getRaw()  # raw/structs become hex
+                    else:                   val=rec.getRaw()
                 except:
                     val=""
-                # include metadata so backend can re-publish structs properly
                 rows.append((f"{ts:.6f}",sd.name,tp,str(val), sd.metadata if sd.metadata else ""))
         tmp=tempfile.NamedTemporaryFile(delete=False,suffix=".csv",
                                         mode="w",newline="",encoding="utf-8")
@@ -169,7 +167,8 @@ class ConvertWorker(QObject):
         path=tmp.name; tmp.close()
         self.finished.emit(path)
 
-# ---- UI pieces (TimelineView, Controller, windows) unchanged except CSV reader expects 5 cols ----
+
+# ---------- timeline ----------
 class TimelineView(QGraphicsView):
     positionClicked = Signal(float)
     def __init__(self, duration, parent=None):
@@ -197,8 +196,8 @@ class TimelineView(QGraphicsView):
                   QColor(0,0,200)
             sc.addRect(x0,0,width,40,QPen(Qt.NoPen),QBrush(color))
         pen = QPen(Qt.white)
-        pen.setWidth(1)  # Stroke thickness in pixels
-        pen.setJoinStyle(Qt.RoundJoin) 
+        pen.setWidth(1)
+        pen.setJoinStyle(Qt.RoundJoin)
         sc.addRect(0,0,w,40,pen)
     def wheelEvent(self, ev):
         dx=ev.angleDelta().x(); dy=ev.angleDelta().y()
@@ -246,6 +245,8 @@ class TimelineView(QGraphicsView):
         painter.drawLine(x,0,x,vh)
         painter.restore()
 
+
+# ---------- controller ----------
 class Controller(QObject):
     loaded=Signal(int,float)
     segmentsChanged=Signal(list)
@@ -288,12 +289,10 @@ class Controller(QObject):
         self.log=[]
         with open(csv_path,newline="",encoding="utf-8") as f:
             r=csv.reader(f); header=next(r)
-            # expect 5 columns with meta
             for row in r:
                 try: ts=float(row[0])
                 except: continue
                 if ts>1000: continue
-                # store (ts,key,type,value,meta)
                 meta = row[4] if len(row)>=5 else ""
                 self.log.append((ts,row[1],row[2],row[3],meta))
         self.log.sort(key=lambda x:x[0])
@@ -373,19 +372,16 @@ class Controller(QObject):
             self.idx+=1
         self.progressChanged.emit(self.idx,total)
         self.elapsedChanged.emit(now)
-        
+
+
+# ---------- tray window ----------
 class TrayWindow(QWidget):
     def __init__(self, ctrl, full_win):
         super().__init__(None, Qt.Tool)
         self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_StyledBackground)
         self.setFixedSize(600,100)
-        
-        self.setStyleSheet("""
-            QWidget {
-                background-color: rgba(33, 34, 34, 230);
-            }
-        """)
+        self.setStyleSheet("QWidget { background-color: rgba(33, 34, 34, 230); }")
 
         self.ctrl, self.full = ctrl, full_win
 
@@ -476,6 +472,8 @@ class TrayWindow(QWidget):
         self.move(x, y)
         super().showEvent(event)
 
+
+# ---------- full window ----------
 class FullWindow(QMainWindow):
     def __init__(self, ctrl):
         super().__init__()
@@ -501,9 +499,7 @@ class FullWindow(QMainWindow):
 
         self.timeline = TimelineView(1.0)
         self.timeline.positionClicked.connect(lambda ts: (
-            ctrl.seek(ts),
-            self.timeline.update_cursor(ts),
-            self._update_progress(ts)
+            ctrl.seek(ts), self.timeline.update_cursor(ts), self._update_progress(ts)
         ))
 
         self.lbl_progress = QLabel('0/0')
@@ -551,45 +547,86 @@ class FullWindow(QMainWindow):
         self.lbl_progress.setText(f'{idx}/{tot}')
         self.lbl_elapsed.setText(f'{ts:.2f}s')
 
+
+# ---------- main ----------
 def main():
-    if QApplication.instance() is None:
-        app = QApplication(sys.argv)
+    app = QApplication.instance() or QApplication(sys.argv)
 
-    base = Path(__file__).parent
-    icon_path = base/'icon.ico'
-    if icon_path.exists():
-        tray_icon = QIcon(str(icon_path))
-        app.setWindowIcon(tray_icon)
-    else:
-        tray_icon = QIcon()
-
+    # Controller + windows
     ctrl     = Controller()
     full     = FullWindow(ctrl)
-    if not tray_icon.isNull():
-        full.setWindowIcon(tray_icon)
     tray_win = TrayWindow(ctrl, full)
-    if not tray_icon.isNull():
-        tray_win.setWindowIcon(tray_icon)
 
-    
-    
-    icon_path = _asset_path("icon.ico")
-    tray_icon = QIcon(icon_path)
+    # Load icons (once)
+    ICON_BW     = QIcon(_asset_path("icon_bw.ico"))
+    ICON_NORMAL = QIcon(_asset_path("icon.ico"))
+    ICON_GREEN  = QIcon(_asset_path("icon_green.ico"))
 
-    if tray_icon.isNull():
-        # Fallback: draw a small in-memory pixmap so tray always has an icon
-        pm = QPixmap(32, 32)
-        pm.fill(QColor(83, 194, 104))  # green tile
-        p = QPainter(pm); p.setRenderHint(QPainter.Antialiasing)
-        p.setBrush(QBrush(QColor(33, 34, 34))); p.setPen(Qt.NoPen)
-        p.drawEllipse(6, 6, 20, 20)
-        p.end()
-        tray_icon = QIcon(pm)
+    # App/window icons (static)
+    app.setWindowIcon(ICON_NORMAL)
+    full.setWindowIcon(ICON_NORMAL)
+    tray_win.setWindowIcon(ICON_NORMAL)
 
-    app.setWindowIcon(tray_icon)
-    tray = QSystemTrayIcon(tray_icon, app)
-    
+    # Tray
+    tray = QSystemTrayIcon(ICON_BW if not ctrl.log else ICON_NORMAL, app)
     tray.setToolTip('MAritz')
+
+    # De-stuttered icon swapping
+    class TrayState(Enum):
+        NO_LOG = 0
+        LOADED_IDLE = 1
+        PLAYING = 2
+
+    def compute_state() -> TrayState:
+        if not ctrl.log:
+            return TrayState.NO_LOG
+        return TrayState.PLAYING if ctrl.timer.isActive() else TrayState.LOADED_IDLE
+
+    _current_state = {"state": None}
+    _debounce = QTimer()
+    _debounce.setSingleShot(True)
+    _debounce.setInterval(150)  # ms
+
+    def _apply_icon_for(state: TrayState):
+        if _current_state["state"] == state:
+            return
+        _current_state["state"] = state
+        if state == TrayState.NO_LOG:
+            tray.setIcon(ICON_BW)
+        elif state == TrayState.LOADED_IDLE:
+            tray.setIcon(ICON_NORMAL)
+        else:
+            tray.setIcon(ICON_GREEN)
+
+    def _debounce_tick():
+        _apply_icon_for(compute_state())
+
+    _debounce.timeout.connect(_debounce_tick)
+
+    def schedule_update():
+        if not _debounce.isActive():
+            _debounce.start()
+
+    # initial icon
+    _apply_icon_for(compute_state())
+
+    # update on events that actually change state
+    ctrl.loaded.connect(lambda *_: schedule_update())
+
+    # patch play/publish UI updates to also schedule tray update
+    orig_play = tray_win._update_play_status
+    def _upd_play():
+        orig_play()
+        schedule_update()
+    tray_win._update_play_status = _upd_play
+
+    orig_pub = tray_win._update_pub_status
+    def _upd_pub():
+        orig_pub()
+        # schedule_update()  # enable if you ever map publish state to an icon
+    tray_win._update_pub_status = _upd_pub
+
+    # menu + show
     menu = QMenu()
     show_action = QAction('Show Controls')
     show_action.triggered.connect(tray_win.show)
@@ -602,26 +639,20 @@ def main():
 
     sys.exit(app.exec())
 
-if __name__ == '__main__':
-    import sys as _sys
 
-    if '--publisher' in _sys.argv:
-        # Run backend-only mode (no QApplication, no tray)
+if __name__ == '__main__':
+    if '--publisher' in sys.argv:
         import multiprocessing
         multiprocessing.freeze_support()
-
         from publisher_process import main as _publisher_main
         _publisher_main()
         raise SystemExit(0)
-    
-    
+
     import multiprocessing
     multiprocessing.freeze_support()
-    # expose backend_client module name expected by Controller import
-    import types, sys as _sys
-    import backend_client_py as _bc
-    _sys.modules['backend_client'] = _bc
-    main()
 
-# Windows + Full windows code unchanged from previous zip…
-# (Omitted for brevity — only the ConvertWorker and CSV reader needed changes for struct support.)
+    # allow `from backend_client import BackendProcess` in Controller
+    import backend_client_py as _bc
+    sys.modules['backend_client'] = _bc
+
+    main()
