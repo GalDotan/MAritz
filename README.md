@@ -3,7 +3,7 @@
 **MAritz** is a desktop application for replaying `.wpilog` files over NetworkTables in simulation.  
 It includes a timeline UI, tray controls, and a minimalist, easy-to-use interface.
 
-![Demo](/DocsMeterial/Demo.gif)
+![Demo](/DocsMaterial/Demo.gif)
 
 ---
 
@@ -56,6 +56,7 @@ NetworkTableInstance.getDefault()
     .getTable("/Replay")
     .getEntry("/NT:/MALog/Subsystems/Swerve/Modules/Front Left/Drive Position")
     .getDouble(0);
+```
 
 > Note:
 All data is published under the /Replay table.
