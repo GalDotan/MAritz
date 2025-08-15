@@ -3,7 +3,7 @@
 **MAritz** is a desktop application for replaying `.wpilog` files over NetworkTables in simulation.  
 It includes a timeline UI, tray controls, and a minimalist, easy-to-use interface.
 
-![](...\Docs Meterial\Demo.gif)
+![](/DocsMeterial/Demo.gif)
 
 ---
 
@@ -32,6 +32,8 @@ It includes a timeline UI, tray controls, and a minimalist, easy-to-use interfac
 3. **Start replaying!** – *(GIF example here)*  
 
 **Note:**  Replay continues even after closing the main window or tray icon, until the process is stopped.
+
+To close the program, right click on the tray icon and press exit.
 
 ---
 
