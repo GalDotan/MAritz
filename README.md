@@ -27,11 +27,13 @@ It includes a timeline UI, tray controls, and a minimalist, easy-to-use interfac
 ---
 
 ## **Usage**
-1. **Open a log file** – *(GIF example here)*  
-2. **Start NT broadcast** – *(GIF example here)*  
-3. **Start replaying!** – *(GIF example here)*  
+1. **Open a log file** 
+2. **Start NT broadcast** 
+3. **Start replaying!**
 
 **Note:**  Replay continues even after closing the main window or tray icon, until the process is stopped.
+
+The log values are published every 20ms.
 
 To close the program, right click on the tray icon and press exit.
 
