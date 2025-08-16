@@ -5,23 +5,30 @@ import tempfile
 import math
 import bisect
 import json
+import atexit
+import threading
 from pathlib import Path
+from enum import Enum
+from typing import SupportsBytes
+
+# ---- Optional global hotkeys (works even when tray is hidden) ----
+try:
+    import keyboard  # pip install keyboard
+    _HAS_KEYBOARD = True
+except Exception:
+    _HAS_KEYBOARD = False
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QPushButton, QFileDialog,
     QLabel, QVBoxLayout, QHBoxLayout, QGraphicsView, QGraphicsScene,
     QSystemTrayIcon, QMenu
 )
-from PySide6.QtCore import (
-    QObject, QThread, Signal, QTimer, Qt
-)
+from PySide6.QtCore import QObject, QThread, Signal, QTimer, Qt
 from PySide6.QtGui import (
     QPalette, QColor, QPen, QBrush, QPainter, QFont, QIcon, QAction, QPixmap
 )
 
 import struct
-from typing import SupportsBytes
-from enum import Enum
 
 from backend_client_py import BackendProcess
 
@@ -472,8 +479,6 @@ class TrayWindow(QWidget):
         self.move(x, y)
         super().showEvent(event)
 
-
-# ---------- full window ----------
 class FullWindow(QMainWindow):
     def __init__(self, ctrl):
         super().__init__()
@@ -546,6 +551,35 @@ class FullWindow(QMainWindow):
         tot = len(self.ctrl.log)
         self.lbl_progress.setText(f'{idx}/{tot}')
         self.lbl_elapsed.setText(f'{ts:.2f}s')
+
+
+# --------- Global hotkey Qt bridge ---------
+class HotkeyBridge(QObject):
+    toggleReplay = Signal()
+    toggleBroadcast = Signal()
+    openLog = Signal()
+
+
+_hotkey_thread = None
+
+def start_global_hotkeys(bridge: HotkeyBridge):
+    if not _HAS_KEYBOARD:
+        # still run app; just no hotkeys
+        print("[hotkeys] 'keyboard' package not found; global hotkeys disabled.")
+        return
+    def _worker():
+        keyboard.add_hotkey('alt+r+s', bridge.toggleReplay.emit)
+        keyboard.add_hotkey('alt+r+b', bridge.toggleBroadcast.emit)
+        keyboard.add_hotkey('alt+r+o', bridge.openLog.emit)
+        keyboard.wait()
+    global _hotkey_thread
+    _hotkey_thread = threading.Thread(target=_worker, daemon=True)
+    _hotkey_thread.start()
+
+def stop_global_hotkeys():
+    if _HAS_KEYBOARD:
+        try: keyboard.unhook_all_hotkeys()
+        except Exception: pass
 
 
 # ---------- main ----------
@@ -623,7 +657,7 @@ def main():
     orig_pub = tray_win._update_pub_status
     def _upd_pub():
         orig_pub()
-        # schedule_update()  # enable if you ever map publish state to an icon
+        # If you ever map publish state to an icon, call schedule_update() here.
     tray_win._update_pub_status = _upd_pub
 
     # menu + show
@@ -636,6 +670,15 @@ def main():
     tray.setContextMenu(menu)
     tray.activated.connect(lambda r: tray_win.show() if r==QSystemTrayIcon.Trigger else None)
     tray.show()
+
+    # ---- Global hotkeys (work even when tray hidden) ----
+    bridge = HotkeyBridge()
+    bridge.toggleReplay.connect(tray_win._on_toggle_replay)
+    bridge.toggleBroadcast.connect(tray_win._on_toggle_pub)
+    bridge.openLog.connect(tray_win._on_open)
+
+    start_global_hotkeys(bridge)
+    atexit.register(stop_global_hotkeys)
 
     sys.exit(app.exec())
 

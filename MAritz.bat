@@ -42,6 +42,13 @@ if errorlevel 1 (
     %PIP% install robotpy
 )
 
+REM Install robotpy if missing
+%PIP% show keyboard >nul 2>&1
+if errorlevel 1 (
+    echo Installing keyboard...
+    %PIP% install keyboard
+)
+
 REM Launch without console
 start "" "%PYTHON%" main.py
 
