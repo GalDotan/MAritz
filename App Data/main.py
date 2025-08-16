@@ -4,29 +4,45 @@ import csv
 import tempfile
 import math
 import bisect
+import json
+import atexit
+import threading
 from pathlib import Path
+from enum import Enum
+from typing import SupportsBytes
+
+# ---- Optional global hotkeys (works even when tray is hidden) ----
+try:
+    import keyboard  # pip install keyboard
+    _HAS_KEYBOARD = True
+except Exception:
+    _HAS_KEYBOARD = False
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QPushButton, QFileDialog,
     QLabel, QVBoxLayout, QHBoxLayout, QGraphicsView, QGraphicsScene,
     QSystemTrayIcon, QMenu
 )
-from PySide6.QtCore import (
-    QObject, QThread, Signal, QTimer, Qt
-)
+from PySide6.QtCore import QObject, QThread, Signal, QTimer, Qt
 from PySide6.QtGui import (
-    QPalette, QColor, QPen, QBrush, QPainter, QFont, QIcon, QAction
+    QPalette, QColor, QPen, QBrush, QPainter, QFont, QIcon, QAction, QPixmap
 )
 
 import struct
-from typing import SupportsBytes
-try:
-    from ntcore import NetworkTableInstance
-except ImportError:
-    NetworkTableInstance = None
+
+from backend_client_py import BackendProcess
 
 
-# --- WPILOG parser (unchanged) ---
+# ---------- asset path (works in PyInstaller + source) ----------
+def _asset_path(name: str) -> str:
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        base = Path(sys._MEIPASS)
+    else:
+        base = Path(__file__).parent
+    return str((base / name).resolve())
+
+
+# ---------- WPILOG parsing ----------
 floatStruct = struct.Struct("<f")
 doubleStruct = struct.Struct("<d")
 kControlStart, kControlFinish, kControlSetMetadata = 0, 1, 2
@@ -151,78 +167,69 @@ class ConvertWorker(QObject):
                     else:                   val=rec.getRaw()
                 except:
                     val=""
-                rows.append((f"{ts:.6f}",sd.name,tp,str(val)))
+                rows.append((f"{ts:.6f}",sd.name,tp,str(val), sd.metadata if sd.metadata else ""))
         tmp=tempfile.NamedTemporaryFile(delete=False,suffix=".csv",
                                         mode="w",newline="",encoding="utf-8")
-        w=csv.writer(tmp); w.writerow(("timestamp","key","type","value")); w.writerows(rows)
+        w=csv.writer(tmp); w.writerow(("timestamp","key","type","value","meta")); w.writerows(rows)
         path=tmp.name; tmp.close()
         self.finished.emit(path)
 
-# --- TimelineView with click, zoom, segments, fixed cursor thickness ---
+
+# ---------- timeline ----------
 class TimelineView(QGraphicsView):
     positionClicked = Signal(float)
-
     def __init__(self, duration, parent=None):
         super().__init__(parent)
-        self.duration=duration
-        self.segments=[]
-        self.cursor_x=0.0
-        self.setScene(QGraphicsScene(self))
+        self.duration=duration; self.segments=[]; self.cursor_x=0.0
+        self.setScene( QGraphicsScene(self) )
         self.setRenderHints(self.renderHints()|QPainter.Antialiasing)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setDragMode(QGraphicsView.ScrollHandDrag)
         self._draw_segments()
-
     def set_segments(self, segments):
-        self.segments=segments
-        self._draw_segments()
-
+        self.segments=segments; self._draw_segments()
     def _draw_segments(self):
         sc=self.scene(); sc.clear()
         w=max(800,int(self.duration*100))
-        sc.setSceneRect(0,0,w,80)
+        sc.setSceneRect(0,0,w,40)
         for s,e,st in self.segments:
             if s>1000: continue
             ex=min(e,1000)
             x0=s*100; width=(ex-s)*100
-            color = (
-                QColor(200,0,0) if st=="estop" else
-                QColor(80,80,80) if st=="disabled" else
-                QColor(0,200,0) if st=="autonomous" else
-                QColor(0,0,200)
-            )
-            sc.addRect(x0,0,width,80,QPen(Qt.NoPen),QBrush(color))
-        sc.addRect(0,0,w,80,QPen(Qt.white))
-
+            color=QColor(200,0,0) if st=="estop" else \
+                  QColor(80,80,80) if st=="disabled" else \
+                  QColor(0,200,0) if st=="autonomous" else \
+                  QColor(0,0,200)
+            sc.addRect(x0,0,width,40,QPen(Qt.NoPen),QBrush(color))
+        pen = QPen(Qt.white)
+        pen.setWidth(1)
+        pen.setJoinStyle(Qt.RoundJoin)
+        sc.addRect(0,0,w,40,pen)
     def wheelEvent(self, ev):
         dx=ev.angleDelta().x(); dy=ev.angleDelta().y()
         if dx:
-            sb=self.horizontalScrollBar()
-            sb.setValue(sb.value()-dx)
+            sb=self.horizontalScrollBar(); sb.setValue(sb.value()-dx)
             return
         factor=1.2**(dy/120) if dy else 1.0
-        current=self.transform().m11()
-        scene_w=self.sceneRect().width(); view_w=self.viewport().width()
-        min_scale=view_w/scene_w if scene_w>0 else 1.0
-        new=current*factor
-        if new<min_scale: factor=min_scale/current
-        self.scale(factor,1)
-        self.viewport().update()
-
+        cur=self.transform().m11()
+        sw=self.sceneRect().width(); vw=self.viewport().width()
+        min_s=vw/sw if sw>0 else 1.0
+        new=cur*factor
+        if new<min_s: factor=min_s/cur
+        self.scale(factor,1); self.viewport().update()
     def mousePressEvent(self, ev):
-        if ev.button()==Qt.LeftButton:
-            pt=self.mapToScene(ev.pos())
-            ts=max(0,min(pt.x()/100,self.duration,1000))
+        if ev.button() == Qt.LeftButton:
+            p = ev.position()
+            pt = self.mapToScene(p.x(), p.y())
+            ts = max(0, min(pt.x()/100, self.duration, 1000))
             self.positionClicked.emit(ts)
         super().mousePressEvent(ev)
-
     def update_cursor(self, t):
         if t>1000: return
         self.cursor_x=t*100
-        self.ensureVisible(self.cursor_x,0,50,80)
+        self.ensureVisible(self.cursor_x,0,50,40)
         self.viewport().update()
-
     def drawForeground(self, painter, rect):
         painter.save(); painter.resetTransform()
         pen=QPen(Qt.white); pen.setWidth(1); painter.setPen(pen)
@@ -245,7 +252,8 @@ class TimelineView(QGraphicsView):
         painter.drawLine(x,0,x,vh)
         painter.restore()
 
-# --- Controller (connect NT in toggle_publish, not in toggle_replay) ---
+
+# ---------- controller ----------
 class Controller(QObject):
     loaded=Signal(int,float)
     segmentsChanged=Signal(list)
@@ -259,16 +267,21 @@ class Controller(QObject):
         self.idx=0; self.start_time=0.0
         self.is_publishing=False
         self.segments=[]
-        self.nt_inst=NetworkTableInstance.getDefault() if NetworkTableInstance else None
-        self.nt_table=None
-        self.timer=QTimer(self); self.timer.setInterval(10); self.timer.timeout.connect(self._tick)
 
-        # pick the server you want to talk to
-        self.nt_host = "127.0.0.1"  # or robot IP / hostname
-        self.nt_port = 5810         # NT4 default; use 1735 if your server is NT3
+        self.timer=QTimer(self)
+        self.timer.setTimerType(Qt.PreciseTimer)
+        self.timer.setInterval(4)
+        self.timer.timeout.connect(self._tick)
+
+        self.nt_host = "127.0.0.1"
+        self.nt_port = 5810
+
+        if not hasattr(self, "backend") or self.backend is None:
+            from backend_client import BackendProcess as BE
+            self.backend = BE()
 
     def open_log(self, parent):
-        path,_=QFileDialog.getOpenFileName(parent, "Open WPILog", "","WPILog Files (*.wpilog);;All Files (*)")
+        path,_=QFileDialog.getOpenFileName(parent, "Open WPILog","","WPILog Files (*.wpilog);;All Files (*)")
         if not path: return
         self.worker=ConvertWorker(Path(path))
         self.thread=QThread()
@@ -282,12 +295,13 @@ class Controller(QObject):
         self.csv_path=csv_path
         self.log=[]
         with open(csv_path,newline="",encoding="utf-8") as f:
-            r=csv.reader(f); next(r)
+            r=csv.reader(f); header=next(r)
             for row in r:
                 try: ts=float(row[0])
                 except: continue
                 if ts>1000: continue
-                self.log.append((ts,row[1],row[2],row[3]))
+                meta = row[4] if len(row)>=5 else ""
+                self.log.append((ts,row[1],row[2],row[3],meta))
         self.log.sort(key=lambda x:x[0])
         self.timestamps=[r[0] for r in self.log]
         total=len(self.log); duration=self.timestamps[-1] if total else 1.0
@@ -299,7 +313,7 @@ class Controller(QObject):
             if flags["autonomous"]: return "autonomous"
             return "teleop"
         segs=[]; cur=state(); st=0.0
-        for ts,key,_,val in self.log:
+        for ts,key,_,val,_ in self.log:
             if key.startswith("DS:"):
                 f=key.split("DS:")[1]
                 if f in flags:
@@ -313,31 +327,28 @@ class Controller(QObject):
         self.loaded.emit(total,duration)
         self.segmentsChanged.emit(segs)
 
-    def _connect_nt(self):
-        if not self.nt_inst:
-            print("ntcore not available; install robotpy-ntcore.")
-            return False
-        self.nt_inst.stopClient()  # ensure clean state
-        # Set server first, then start client
-        self.nt_inst.setServer(self.nt_host, self.nt_port)
-        self.nt_inst.startClient4("MAritz")
-        self.nt_table=self.nt_inst.getTable("Replay")
-        return True
-
-    def _disconnect_nt(self):
-        if self.nt_inst:
-            self.nt_inst.stopClient()
-        self.nt_table=None
+        try:
+            self.backend.start(self.nt_host, self.nt_port, self.csv_path)
+        except Exception as e:
+            print("Backend preload failed:", e)
 
     def toggle_publish(self):
-        # Turn publishing on/off AND connect/disconnect NT here
         self.is_publishing = not self.is_publishing
-        if self.is_publishing:
-            ok = self._connect_nt()
-            if not ok:
-                self.is_publishing = False
-        else:
-            self._disconnect_nt()
+        try:
+            if self.is_publishing:
+                resp = self.backend.pub_on()
+                if resp != "OK":
+                    raise RuntimeError(f"Backend replied: {resp}")
+                if self.timestamps:
+                    cur_t = self.timestamps[self.idx] if self.idx < len(self.timestamps) else 0.0
+                    self.backend.seek(cur_t)
+                if self.timer.isActive():
+                    self.backend.play()
+            else:
+                self.backend.pub_off()
+        except Exception as e:
+            print('Failed to toggle publish:', e)
+            self.is_publishing = False
 
     def toggle_replay(self):
         if not self.log: return
@@ -345,110 +356,120 @@ class Controller(QObject):
             base=self.timestamps[self.idx] if self.idx<len(self.timestamps) else 0.0
             self.start_time=time.perf_counter()-base
             self.timer.start()
+            try:
+                if self.is_publishing: self.backend.play()
+            except Exception: pass
         else:
             self.timer.stop()
+            try:
+                if self.is_publishing: self.backend.pause()
+            except Exception: pass
 
     def seek(self, t):
         self.idx=bisect.bisect_left(self.timestamps,t)
         self.start_time=time.perf_counter()-t
+        try:
+            if self.is_publishing: self.backend.seek(t)
+        except Exception: pass
 
     def _tick(self):
         now=time.perf_counter()-self.start_time
         total=len(self.log)
         while self.idx<total and self.log[self.idx][0]<=now:
-            ts,key,tp,val=self.log[self.idx]
-            if self.is_publishing and self.nt_table:
-                if tp=="boolean":
-                    self.nt_table.putBoolean(key,val=="True")
-                elif tp in ("int64","float","double"):
-                    try: num=float(val)
-                    except: num=0.0
-                    self.nt_table.putNumber(key,num)
-                elif tp=="string":
-                    self.nt_table.putString(key,val)
-                elif tp=="boolean[]":
-                    arr=val.split(",") if val else []
-                    bools=[e=="True" for e in arr]
-                    self.nt_table.putBooleanArray(key,bools)
-                elif tp in ("int64[]","float[]","double[]"):
-                    arr=val.split(",") if val else []
-                    nums=[]
-                    for e in arr:
-                        try: nums.append(float(e))
-                        except: nums.append(0.0)
-                    self.nt_table.putNumberArray(key,nums)
-                elif tp=="string[]":
-                    arr=val.split(",") if val else []
-                    self.nt_table.putStringArray(key,arr)
             self.idx+=1
         self.progressChanged.emit(self.idx,total)
         self.elapsedChanged.emit(now)
 
 
-# --- TrayWindow bottom-right, frameless, not movable, with close 'X' ---
+# ---------- tray window ----------
 class TrayWindow(QWidget):
     def __init__(self, ctrl, full_win):
         super().__init__(None, Qt.Tool)
         self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
-        self.setAttribute(Qt.WA_TranslucentBackground, False)
-        self.setFixedSize(600,180)
+        self.setAttribute(Qt.WA_StyledBackground)
+        self.setFixedSize(600,100)
+        self.setStyleSheet("QWidget { background-color: rgba(33, 34, 34, 230); }")
 
         self.ctrl, self.full = ctrl, full_win
 
-        btn_open = QPushButton("Open Log")
-        btn_open.clicked.connect(lambda: ctrl.open_log(self))
-        self.btn_replay = QPushButton("Play")
-        self.btn_replay.setEnabled(False)
-        self.btn_replay.clicked.connect(lambda: (ctrl.toggle_replay(), self._update()))
-        self.btn_pub = QPushButton("Start Broadcast")
-        self.btn_pub.setEnabled(False)
-        self.btn_pub.clicked.connect(lambda: (ctrl.toggle_publish(), self._update_pub()))
-        btn_full = QPushButton("Full App")
-        btn_full.clicked.connect(full_win.show)
-        btn_close = QPushButton("✕")
-        btn_close.setFixedSize(20,20)
+        btn_open   = QPushButton('Open Log')
+        btn_open.clicked.connect(self._on_open)
+        self.btn_replay = QPushButton('Play'); self.btn_replay.setEnabled(False)
+        self.btn_replay.clicked.connect(self._on_toggle_replay)
+        self.btn_pub    = QPushButton('Start Broadcast'); self.btn_pub.setEnabled(False)
+        self.btn_pub.clicked.connect(self._on_toggle_pub)
+        btn_full   = QPushButton('Full App'); btn_full.clicked.connect(full_win.show)
+        btn_close  = QPushButton('✕'); btn_close.setFixedSize(20,20)
         btn_close.clicked.connect(self.hide)
-        btn_close.setStyleSheet("background:transparent; color:white;")
+        btn_close.setStyleSheet('background:transparent; color:white;')
+
+        self.lbl_status  = QLabel('Log not loaded'); self.lbl_status.setStyleSheet('color:white')
+        self.lbl_elapsed = QLabel('0.00s'); self.lbl_elapsed.setStyleSheet('color:white')
 
         self.timeline = TimelineView(1.0)
         self.timeline.positionClicked.connect(lambda ts: (ctrl.seek(ts), self.timeline.update_cursor(ts)))
 
         top = QHBoxLayout()
-        top.addWidget(btn_open)
-        top.addWidget(self.btn_replay)
-        top.addWidget(self.btn_pub)
-        top.addWidget(btn_full)
-        top.addStretch()
-        top.addWidget(btn_close)
+        top.addWidget(btn_open); top.addWidget(self.btn_replay); top.addWidget(self.btn_pub)
+        top.addWidget(btn_full); top.addSpacing(15); top.addWidget(self.lbl_status)
+        top.addSpacing(15); top.addWidget(self.lbl_elapsed); top.addStretch(); top.addWidget(btn_close)
         top.setContentsMargins(5,5,5,5)
 
         layout = QVBoxLayout(self)
-        layout.addLayout(top)
-        layout.addWidget(self.timeline)
-        layout.setContentsMargins(2,2,2,2)
-        self.setLayout(layout)
+        layout.addLayout(top); layout.addWidget(self.timeline)
+        layout.setContentsMargins(2,2,2,2); self.setLayout(layout)
 
         ctrl.loaded.connect(self._on_loaded)
         ctrl.segmentsChanged.connect(self.timeline.set_segments)
-        ctrl.progressChanged.connect(lambda *_: self._update())
-        ctrl.elapsedChanged.connect(lambda e: self.timeline.update_cursor(min(e,self.timeline.duration)))
+        ctrl.elapsedChanged.connect(self._on_elapsed)
+        ctrl.progressChanged.connect(lambda *_: self._update_play_status())
+        ctrl.elapsedChanged.connect(lambda e: self.timeline.update_cursor(min(e, self.timeline.duration)))
+
+    def _on_open(self):
+        self.lbl_status.setText('Loading log'); self.lbl_status.setStyleSheet('color:orange')
+        self.ctrl.open_log(self)
 
     def _on_loaded(self, total, dur):
-        self.btn_replay.setEnabled(True)
-        self.btn_pub.setEnabled(True)
-        self.timeline.duration = dur
-        self.timeline.set_segments(self.ctrl.segments)
-        self._update()
-        self._update_pub()
+        self.btn_replay.setEnabled(True); self.btn_pub.setEnabled(True)
+        self.timeline.duration = dur; self.timeline.set_segments(self.ctrl.segments)
+        self.timeline.resetTransform()
+        view_w = self.timeline.viewport().width()
+        scene_w = self.timeline.sceneRect().width()
+        if scene_w > 0:
+            min_scale = view_w / scene_w
+            self.timeline.scale(min_scale, 1.0)
+        self.timeline.update_cursor(0.0)
+        self.lbl_status.setText('Ready'); self.lbl_status.setStyleSheet('color:white')
+        self.lbl_elapsed.setText('0.00s')
+        self._update_play_status(); self._update_pub_status()
 
-    def _update(self):
-        self.btn_replay.setText("Stop Replay" if self.ctrl.timer.isActive() else "Play")
+    def _on_toggle_replay(self):
+        self.ctrl.toggle_replay(); self._update_play_status()
 
-    def _update_pub(self):
-        self.btn_pub.setText("Stop Broadcast" if self.ctrl.is_publishing else "Start Broadcast")
+    def _on_toggle_pub(self):
+        self.ctrl.toggle_publish(); self._update_pub_status()
+
+    def _update_play_status(self):
+        running = self.ctrl.timer.isActive()
+        self.btn_replay.setText('Stop Replay' if running else 'Play')
+        if running:
+            self.btn_replay.setStyleSheet('background-color: #53c268; color: white;')
+        else:
+            self.btn_replay.setStyleSheet('background-color: #cf4e4e; color: white;')
+        if self.lbl_status.text() not in ('Loading log',):
+            self.lbl_status.setText('Running' if running else 'Ready')
+
+    def _update_pub_status(self):
+        on = self.ctrl.is_publishing
+        self.btn_pub.setText('Stop Broadcast' if on else 'Start Broadcast')
+        if on:
+            self.btn_pub.setStyleSheet('background-color: #53c268; color: white;')
+        else:
+            self.btn_pub.setStyleSheet('background-color: #cf4e4e; color: white;')
+
+    def _on_elapsed(self, e): self.lbl_elapsed.setText(f'{e:.2f}s')
 
     def showEvent(self, event):
-        # compute taskbar height
         full = QApplication.primaryScreen().geometry()
         avail = QApplication.primaryScreen().availableGeometry()
         tb_height = full.height() - avail.height()
@@ -458,12 +479,11 @@ class TrayWindow(QWidget):
         self.move(x, y)
         super().showEvent(event)
 
-# --- FullWindow (unchanged) ---
 class FullWindow(QMainWindow):
     def __init__(self, ctrl):
         super().__init__()
         self.ctrl = ctrl
-        self.setWindowTitle("FRC Full App")
+        self.setWindowTitle('MAritz')
         self.setGeometry(200,200,900,200)
         p = QPalette()
         p.setColor(QPalette.Window, QColor(53,53,53))
@@ -474,42 +494,30 @@ class FullWindow(QMainWindow):
         p.setColor(QPalette.ButtonText, Qt.white)
         QApplication.setPalette(p)
 
-        btn_open = QPushButton("Open Log")
+        btn_open = QPushButton('Open Log')
         btn_open.clicked.connect(lambda: ctrl.open_log(self))
-        self.btn_replay = QPushButton("Play")
-        self.btn_replay.setEnabled(False)
+        self.btn_replay = QPushButton('Play'); self.btn_replay.setEnabled(False)
         self.btn_replay.clicked.connect(lambda: (ctrl.toggle_replay(), self._update()))
-        self.btn_pub = QPushButton("Start Broadcast")
-        self.btn_pub.setEnabled(False)
+        self.btn_pub = QPushButton('Start Broadcast'); self.btn_pub.setEnabled(False)
         self.btn_pub.clicked.connect(lambda: (ctrl.toggle_publish(), self._update_pub()))
-        btn_back = QPushButton("Back to Tray")
-        btn_back.clicked.connect(self.hide)
+        btn_back = QPushButton('Back to Tray'); btn_back.clicked.connect(self.hide)
 
         self.timeline = TimelineView(1.0)
         self.timeline.positionClicked.connect(lambda ts: (
-            ctrl.seek(ts),
-            self.timeline.update_cursor(ts),
-            self._update_progress(ts)
+            ctrl.seek(ts), self.timeline.update_cursor(ts), self._update_progress(ts)
         ))
 
-        self.lbl_progress = QLabel("0/0")
-        self.lbl_elapsed  = QLabel("0.00s")
+        self.lbl_progress = QLabel('0/0')
+        self.lbl_elapsed  = QLabel('0.00s')
 
         top = QHBoxLayout()
-        top.addWidget(btn_open)
-        top.addWidget(self.btn_replay)
-        top.addWidget(self.btn_pub)
-        top.addWidget(btn_back)
-        top.addWidget(self.lbl_progress)
-        top.addWidget(self.lbl_elapsed)
+        top.addWidget(btn_open); top.addWidget(self.btn_replay); top.addWidget(self.btn_pub)
+        top.addWidget(btn_back); top.addWidget(self.lbl_progress); top.addWidget(self.lbl_elapsed)
 
         layout = QVBoxLayout()
-        layout.addLayout(top)
-        layout.addWidget(self.timeline)
+        layout.addLayout(top); layout.addWidget(self.timeline)
 
-        w = QWidget()
-        w.setLayout(layout)
-        self.setCentralWidget(w)
+        w = QWidget(); w.setLayout(layout); self.setCentralWidget(w)
 
         ctrl.loaded.connect(lambda t,d: (
             self.btn_replay.setEnabled(True),
@@ -518,48 +526,176 @@ class FullWindow(QMainWindow):
             self.timeline.set_segments(ctrl.segments),
             self._update_progress(0)
         ))
-        ctrl.progressChanged.connect(lambda i, tot: self.lbl_progress.setText(f"{i}/{tot}"))
-        ctrl.elapsedChanged.connect(lambda e: self.lbl_elapsed.setText(f"{e:.2f}s"))
+        ctrl.progressChanged.connect(lambda i, tot: self.lbl_progress.setText(f'{i}/{tot}'))
+        ctrl.elapsedChanged.connect(lambda e: self.lbl_elapsed.setText(f'{e:.2f}s'))
         ctrl.elapsedChanged.connect(lambda e: self.timeline.update_cursor(min(e,self.timeline.duration)))
 
     def _update(self):
-        self.btn_replay.setText("Stop Replay" if self.ctrl.timer.isActive() else "Play")
+        running = self.ctrl.timer.isActive()
+        self.btn_replay.setText('Stop Replay' if running else 'Play')
+        if running:
+            self.btn_replay.setStyleSheet('background-color: #53c268; color: white;')
+        else:
+            self.btn_replay.setStyleSheet('background-color: #cf4e4e; color: white;')
+
     def _update_pub(self):
-        self.btn_pub.setText("Stop Broadcast" if self.ctrl.is_publishing else "Start Broadcast")
+        on = self.ctrl.is_publishing
+        self.btn_pub.setText('Stop Broadcast' if on else 'Start Broadcast')
+        if on:
+            self.btn_pub.setStyleSheet('background-color: #53c268; color: white;')
+        else:
+            self.btn_pub.setStyleSheet('background-color: #cf4e4e; color: white;')
+
     def _update_progress(self, ts):
         idx = bisect.bisect_left(self.ctrl.timestamps, ts)
         tot = len(self.ctrl.log)
-        self.lbl_progress.setText(f"{idx}/{tot}")
-        self.lbl_elapsed.setText(f"{ts:.2f}s")
+        self.lbl_progress.setText(f'{idx}/{tot}')
+        self.lbl_elapsed.setText(f'{ts:.2f}s')
 
+
+# --------- Global hotkey Qt bridge ---------
+class HotkeyBridge(QObject):
+    toggleReplay = Signal()
+    toggleBroadcast = Signal()
+    openLog = Signal()
+
+
+_hotkey_thread = None
+
+def start_global_hotkeys(bridge: HotkeyBridge):
+    if not _HAS_KEYBOARD:
+        # still run app; just no hotkeys
+        print("[hotkeys] 'keyboard' package not found; global hotkeys disabled.")
+        return
+    def _worker():
+        keyboard.add_hotkey('alt+r+s', bridge.toggleReplay.emit)
+        keyboard.add_hotkey('alt+r+b', bridge.toggleBroadcast.emit)
+        keyboard.add_hotkey('alt+r+o', bridge.openLog.emit)
+        keyboard.wait()
+    global _hotkey_thread
+    _hotkey_thread = threading.Thread(target=_worker, daemon=True)
+    _hotkey_thread.start()
+
+def stop_global_hotkeys():
+    if _HAS_KEYBOARD:
+        try: keyboard.unhook_all_hotkeys()
+        except Exception: pass
+
+
+# ---------- main ----------
 def main():
-    app = QApplication(sys.argv)
+    app = QApplication.instance() or QApplication(sys.argv)
 
-    base = Path(__file__).parent
-    icon_path = base/"icon.ico"
-    tray_icon = QIcon(str(icon_path))
-    app.setWindowIcon(tray_icon)
-
+    # Controller + windows
     ctrl     = Controller()
     full     = FullWindow(ctrl)
-    full.setWindowIcon(tray_icon)
     tray_win = TrayWindow(ctrl, full)
-    tray_win.setWindowIcon(tray_icon)
 
-    tray = QSystemTrayIcon(tray_icon, app)
-    tray.setToolTip("FRC Log Replayer")
+    # Load icons (once)
+    ICON_BW     = QIcon(_asset_path("icon_bw.ico"))
+    ICON_NORMAL = QIcon(_asset_path("icon.ico"))
+    ICON_GREEN  = QIcon(_asset_path("icon_green.ico"))
+
+    # App/window icons (static)
+    app.setWindowIcon(ICON_NORMAL)
+    full.setWindowIcon(ICON_NORMAL)
+    tray_win.setWindowIcon(ICON_NORMAL)
+
+    # Tray
+    tray = QSystemTrayIcon(ICON_BW if not ctrl.log else ICON_NORMAL, app)
+    tray.setToolTip('MAritz')
+
+    # De-stuttered icon swapping
+    class TrayState(Enum):
+        NO_LOG = 0
+        LOADED_IDLE = 1
+        PLAYING = 2
+
+    def compute_state() -> TrayState:
+        if not ctrl.log:
+            return TrayState.NO_LOG
+        return TrayState.PLAYING if ctrl.timer.isActive() else TrayState.LOADED_IDLE
+
+    _current_state = {"state": None}
+    _debounce = QTimer()
+    _debounce.setSingleShot(True)
+    _debounce.setInterval(150)  # ms
+
+    def _apply_icon_for(state: TrayState):
+        if _current_state["state"] == state:
+            return
+        _current_state["state"] = state
+        if state == TrayState.NO_LOG:
+            tray.setIcon(ICON_BW)
+        elif state == TrayState.LOADED_IDLE:
+            tray.setIcon(ICON_NORMAL)
+        else:
+            tray.setIcon(ICON_GREEN)
+
+    def _debounce_tick():
+        _apply_icon_for(compute_state())
+
+    _debounce.timeout.connect(_debounce_tick)
+
+    def schedule_update():
+        if not _debounce.isActive():
+            _debounce.start()
+
+    # initial icon
+    _apply_icon_for(compute_state())
+
+    # update on events that actually change state
+    ctrl.loaded.connect(lambda *_: schedule_update())
+
+    # patch play/publish UI updates to also schedule tray update
+    orig_play = tray_win._update_play_status
+    def _upd_play():
+        orig_play()
+        schedule_update()
+    tray_win._update_play_status = _upd_play
+
+    orig_pub = tray_win._update_pub_status
+    def _upd_pub():
+        orig_pub()
+        # If you ever map publish state to an icon, call schedule_update() here.
+    tray_win._update_pub_status = _upd_pub
+
+    # menu + show
     menu = QMenu()
-    show_action = QAction("Show Controls")
+    show_action = QAction('Show Controls')
     show_action.triggered.connect(tray_win.show)
-    exit_action = QAction("Exit")
+    exit_action = QAction('Exit')
     exit_action.triggered.connect(app.quit)
-    menu.addAction(show_action)
-    menu.addAction(exit_action)
+    menu.addAction(show_action); menu.addAction(exit_action)
     tray.setContextMenu(menu)
     tray.activated.connect(lambda r: tray_win.show() if r==QSystemTrayIcon.Trigger else None)
     tray.show()
 
+    # ---- Global hotkeys (work even when tray hidden) ----
+    bridge = HotkeyBridge()
+    bridge.toggleReplay.connect(tray_win._on_toggle_replay)
+    bridge.toggleBroadcast.connect(tray_win._on_toggle_pub)
+    bridge.openLog.connect(tray_win._on_open)
+
+    start_global_hotkeys(bridge)
+    atexit.register(stop_global_hotkeys)
+
     sys.exit(app.exec())
 
-if __name__ == "__main__":
+
+if __name__ == '__main__':
+    if '--publisher' in sys.argv:
+        import multiprocessing
+        multiprocessing.freeze_support()
+        from publisher_process import main as _publisher_main
+        _publisher_main()
+        raise SystemExit(0)
+
+    import multiprocessing
+    multiprocessing.freeze_support()
+
+    # allow `from backend_client import BackendProcess` in Controller
+    import backend_client_py as _bc
+    sys.modules['backend_client'] = _bc
+
     main()
